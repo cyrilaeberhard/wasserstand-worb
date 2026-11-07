@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="de">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wasserstand Kraftwerk Worb</title>
+<style>
+*{box-sizing:border-box}
+body{font:16px Helvetica,Arial,sans-serif;margin:0;background:#f4f4f2;color:#222}
+header{background:#222;color:#fff;padding:14px 24px;font-size:15px;letter-spacing:.02em}
+main{max-width:920px;margin:0 auto;padding:24px}
+.karte{background:#fff;border:1px solid #ddd;border-radius:6px;padding:20px 24px;margin-bottom:20px}
+.kopf{display:flex;align-items:flex-end;gap:32px;flex-wrap:wrap}
+#z{font-size:72px;font-weight:bold;line-height:1}
+#d{color:#333;line-height:1.6}
+#st{margin-left:auto;text-align:right;color:#555}
+#bar{position:relative;height:18px;background:#e6e6e2;border-radius:3px;margin-top:20px}
+#fuell{height:100%;background:#222;border-radius:3px 0 0 3px;width:0;transition:width .6s}
+#bar i{position:absolute;right:0;top:-5px;bottom:-5px;border-right:2px dashed #999}
+#bar small{position:absolute;right:0;top:24px;color:#777}
+.err{color:#c0392b}
+#b{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+#b span{color:#777;margin-left:12px}
+#b button{font:inherit;padding:4px 10px;border:1px solid #bbb;background:#fff;color:#222;border-radius:4px;cursor:pointer}
+#b button.an{background:#222;color:#fff;border-color:#222}
+canvas{width:100%;height:340px;display:block}
+footer{color:#777;font-size:13px}
+</style>
+<header>Wasserstand Reservoir · Kraftwerk Worb</header>
+<main>
+<div class="karte">
+  <div class="kopf">
+    <div id="z">--</div>
+    <div id="d">Lade Daten …</div>
+    <div id="st"></div>
+  </div>
+  <div id="bar"><div id="fuell"></div><i></i><small>100 % Überlauf</small></div>
+</div>
+<div class="karte">
+  <div id="b">Zeit:
+    <button data-zeit="3600">1 h</button><button data-zeit="21600">6 h</button>
+    <button data-zeit="86400">24 h</button><button data-zeit="604800">7 Tage</button>
+    <span>Skala:</span><button data-skala="0">0–100 %</button><button data-skala="1">Auto-Zoom</button>
+  </div>
+  <canvas id="c"></canvas>
+</div>
+<footer id="s"></footer>
+</main>
+<script>
+// Channel-ID und Read-Key eintragen, oder in der Adresse angeben: dashboard.html?id=123456&key=ABC
+// Oeffentlicher Channel: Key leer lassen. Mit ?demo zum Ausprobieren mit Testdaten.
+const CHANNEL_ID = "", READ_KEY = "";
+const SENSOR_UNTER_VOLL = 82.5, KAL_CM = 62.5, ZEIGER_KAL = 73, STALE_S = 900;
+const CM_NULL = SENSOR_UNTER_VOLL - (SENSOR_UNTER_VOLL - KAL_CM) * 100 / (100 - ZEIGER_KAL);
+
+const q = new URLSearchParams(location.search);
+const id = q.get('id') || CHANNEL_ID, key = q.get('key') || READ_KEY, demo = q.has('demo');
+const $ = s => document.getElementById(s), c = $('c'), g = c.getContext('2d');
+let daten = [], zeit = 86400, auto = 0;   // daten: [ms, spannung, prozent, mA]
+
+function testdaten() {
+  const jetzt = Date.now(), out = [];
+  for (let t = jetzt - 7 * 86400e3; t <= jetzt; t += 300e3) {
+    const p = 55 + 30 * Math.sin(t / 4e7) + 3 * Math.sin(t / 3e6), i = 4 + p / 100 * 12.9;
+    out.push([t, i * .094, p, i]);
+  }
+  return out;
+}
+
+async function lade() {
+  if (demo) return testdaten();
+  if (!id) throw new Error('Keine Channel-ID eingetragen');
+  const url = 'https://api.thingspeak.com/channels/' + id + '/feeds.json?results=8000' + (key ? '&api_key=' + key : '');
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('ThingSpeak antwortet mit ' + r.status);
+  return (await r.json()).feeds
+    .map(f => [Date.parse(f.created_at), +f.field2, +f.field1, +f.field3])
+    .filter(p => p.every(Number.isFinite));
+}
+
+function schritt(r) { const m = 10 ** Math.floor(Math.log10(r)); return [1, 2, 5, 10].map(k => k * m).find(k => k >= r) }
+function uhr(t, mitDatum) {
+  const d = new Date(t), h = d.toLocaleTimeString('de-CH', {hour: '2-digit', minute: '2-digit'});
+  return mitDatum ? d.toLocaleDateString('de-CH', {day: '2-digit', month: '2-digit'}) + ' ' + h : h;
+}
+
+function zeichne() {
+  const t1 = daten.length ? daten[daten.length - 1][0] : Date.now(), v = daten.filter(p => t1 - p[0] <= zeit * 1000), D = devicePixelRatio;
+  const w = c.width = c.clientWidth * D, h = c.height = c.clientHeight * D;
+  g.clearRect(0, 0, w, h); g.font = (11 * D) + 'px Helvetica';
+  const L = 40 * D, B = 22 * D, T = 10 * D;
+  let lo = 0, hi = Math.max(110, ...v.map(p => p[2]));
+  if (auto && v.length) {
+    lo = Math.min(...v.map(p => p[2])); hi = Math.max(...v.map(p => p[2]));
+    const m = Math.max((hi - lo) * .15, 2); lo -= m; hi += m;
+  }
+  const y = p => T + (h - T - B) * (1 - (p - lo) / (hi - lo)), st = schritt((hi - lo) / 5);
+  g.strokeStyle = '#e3e3e0'; g.fillStyle = '#777'; g.lineWidth = 1;
+  for (let p = Math.ceil(lo / st) * st; p <= hi; p += st) {
+    g.beginPath(); g.moveTo(L, y(p)); g.lineTo(w, y(p)); g.stroke(); g.fillText(+p.toFixed(1), 4, y(p) + 4);
+  }
+  if (100 >= lo && 100 <= hi) {
+    g.setLineDash([6 * D, 4 * D]); g.strokeStyle = '#999';
+    g.beginPath(); g.moveTo(L, y(100)); g.lineTo(w, y(100)); g.stroke(); g.setLineDash([]);
+  }
+  if (v.length < 2) return;
+  const t0 = v[0][0], x = t => L + (w - L) * (t - t0) / Math.max(t1 - t0, 1), mitDatum = zeit > 86400;
+  g.fillStyle = '#777';
+  for (let k = 0; k <= 4; k++) {
+    const t = t0 + (t1 - t0) * k / 4, s = uhr(t, mitDatum), bw = g.measureText(s).width;
+    g.fillText(s, Math.min(Math.max(x(t) - bw / 2, L), w - bw), h - 6 * D);
+  }
+  g.strokeStyle = '#222'; g.lineWidth = 2 * D; g.beginPath();
+  v.forEach((p, i) => i ? g.lineTo(x(p[0]), y(p[2])) : g.moveTo(x(p[0]), y(p[2]))); g.stroke();
+}
+
+function anzeigen() {
+  const z = $('z'), d = $('d'), st = $('st');
+  if (!daten.length) { z.textContent = '--'; d.textContent = 'Keine Daten im Channel'; return; }
+  const [t, u, p, i] = daten[daten.length - 1], cm = CM_NULL + p / 100 * (SENSOR_UNTER_VOLL - CM_NULL);
+  const alter = (Date.now() - t) / 1000;
+  z.textContent = p.toFixed(0) + ' %'; z.className = '';
+  d.innerHTML = cm.toFixed(0) + ' cm über Sensor<br>noch ' + Math.max(SENSOR_UNTER_VOLL - cm, 0).toFixed(0) +
+    ' cm bis Überlauf<br>' + i.toFixed(2) + ' mA · ' + u.toFixed(3) + ' V';
+  $('fuell').style.width = Math.min(Math.max(p, 0), 100) + '%';
+  st.className = alter > STALE_S ? 'err' : '';
+  st.innerHTML = alter > STALE_S ? 'Keine aktuellen Daten<br>letzte Sendung vor ' + Math.round(alter / 60) + ' min'
+    : 'Letzte Sendung<br>' + uhr(t, false) + ' Uhr';
+}
+
+function knoepfe() {
+  document.querySelectorAll('#b button').forEach(b =>
+    b.classList.toggle('an', b.dataset.zeit ? +b.dataset.zeit === zeit : +b.dataset.skala === auto));
+}
+$('b').onclick = e => {
+  const b = e.target;
+  if (b.dataset.zeit) zeit = +b.dataset.zeit; else if (b.dataset.skala) auto = +b.dataset.skala; else return;
+  knoepfe(); zeichne();
+};
+
+async function hole() {
+  try {
+    daten = await lade(); anzeigen(); zeichne();
+    $('s').textContent = 'Seite aktualisiert ' + new Date().toLocaleTimeString('de-CH') + ' · ' + daten.length + ' Messpunkte' + (demo ? ' · Testdaten' : '');
+  } catch (e) {
+    $('d').textContent = 'Fehler: ' + e.message; $('d').className = 'err';
+  }
+}
+knoepfe(); hole(); setInterval(hole, 60000); addEventListener('resize', zeichne);
+</script>
+</html>
