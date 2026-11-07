@@ -7,7 +7,7 @@
 *{box-sizing:border-box}
 body{font:16px Helvetica,Arial,sans-serif;margin:0;background:#f4f4f2;color:#222}
 header{background:#222;color:#fff;padding:14px 24px;font-size:15px;letter-spacing:.02em}
-main{max-width:920px;margin:0 auto;padding:24px}
+main{max-width:1100px;margin:0 auto;padding:24px}
 .karte{background:#fff;border:1px solid #ddd;border-radius:6px;padding:20px 24px;margin-bottom:20px}
 .kopf{display:flex;align-items:flex-end;gap:32px;flex-wrap:wrap}
 #z{font-size:72px;font-weight:bold;line-height:1}
@@ -22,7 +22,12 @@ main{max-width:920px;margin:0 auto;padding:24px}
 #b span{color:#777;margin-left:12px}
 #b button{font:inherit;padding:4px 10px;border:1px solid #bbb;background:#fff;color:#222;border-radius:4px;cursor:pointer}
 #b button.an{background:#222;color:#fff;border-color:#222}
-canvas{width:100%;height:340px;display:block}
+.raster{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:20px}
+.raster .karte{margin:0}
+.raster h2{font-size:14px;font-weight:normal;color:#555;margin:0 0 8px;display:flex;justify-content:space-between}
+.raster h2 b{color:#222;font-size:16px}
+canvas{width:100%;height:230px;display:block}
+@media(max-width:480px){.raster{grid-template-columns:1fr}}
 footer{color:#777;font-size:13px}
 </style>
 <header>Wasserstand Reservoir · Kraftwerk Worb</header>
@@ -39,10 +44,10 @@ footer{color:#777;font-size:13px}
   <div id="b">Zeit:
     <button data-zeit="3600">1 h</button><button data-zeit="21600">6 h</button>
     <button data-zeit="86400">24 h</button><button data-zeit="604800">7 Tage</button>
-    <span>Skala:</span><button data-skala="0">0–100 %</button><button data-skala="1">Auto-Zoom</button>
+    <span>Skala:</span><button data-skala="0">Voller Bereich</button><button data-skala="1">Auto-Zoom</button>
   </div>
-  <canvas id="c"></canvas>
 </div>
+<div class="raster" id="raster"></div>
 <footer id="s"></footer>
 </main>
 <script>
@@ -54,14 +59,24 @@ const CM_NULL = SENSOR_UNTER_VOLL - (SENSOR_UNTER_VOLL - KAL_CM) * 100 / (100 - 
 
 const q = new URLSearchParams(location.search);
 const id = q.get('id') || CHANNEL_ID, key = q.get('key') || READ_KEY, demo = q.has('demo');
-const $ = s => document.getElementById(s), c = $('c'), g = c.getContext('2d');
-let daten = [], zeit = 86400, auto = 0;   // daten: [ms, spannung, prozent, mA]
+const $ = s => document.getElementById(s);
+let daten = [], zeit = 86400, auto = 0;   // daten: [ms, spannung, prozent, mA, cm]
+// Diagramme: Spalte im Datensatz, Name, Einheit, voller Bereich, Referenzlinie
+const GRAPHEN = [
+  {k: 2, name: 'Füllstand', einheit: '%', lo: 0, hi: 110, ref: 100, dez: 0},
+  {k: 4, name: 'Wasser über Sensor', einheit: 'cm', lo: 0, hi: 90, ref: SENSOR_UNTER_VOLL, dez: 0},
+  {k: 3, name: 'Strom', einheit: 'mA', lo: 0, hi: 22, ref: null, dez: 2},
+  {k: 1, name: 'Spannung', einheit: 'V', lo: 0, hi: 2, ref: null, dez: 3},
+];
+GRAPHEN.forEach((gr, n) => {
+  $('raster').insertAdjacentHTML('beforeend', '<div class="karte"><h2>' + gr.name + ' <b id="w' + n + '">--</b></h2><canvas id="c' + n + '"></canvas></div>');
+});
 
 function testdaten() {
   const jetzt = Date.now(), out = [];
   for (let t = jetzt - 7 * 86400e3; t <= jetzt; t += 300e3) {
     const p = 55 + 30 * Math.sin(t / 4e7) + 3 * Math.sin(t / 3e6), i = 4 + p / 100 * 12.9;
-    out.push([t, i * .094, p, i]);
+    out.push([t, i * .094, p, i, CM_NULL + p / 100 * (SENSOR_UNTER_VOLL - CM_NULL)]);
   }
   return out;
 }
@@ -74,7 +89,8 @@ async function lade() {
   if (!r.ok) throw new Error('ThingSpeak antwortet mit ' + r.status);
   return (await r.json()).feeds
     .map(f => [Date.parse(f.created_at), +f.field2, +f.field1, +f.field3])
-    .filter(p => p.every(Number.isFinite));
+    .filter(p => p.every(Number.isFinite))
+    .map(p => [...p, CM_NULL + p[2] / 100 * (SENSOR_UNTER_VOLL - CM_NULL)]);
 }
 
 function schritt(r) { const m = 10 ** Math.floor(Math.log10(r)); return [1, 2, 5, 10].map(k => k * m).find(k => k >= r) }
@@ -84,33 +100,38 @@ function uhr(t, mitDatum) {
 }
 
 function zeichne() {
-  const t1 = daten.length ? daten[daten.length - 1][0] : Date.now(), v = daten.filter(p => t1 - p[0] <= zeit * 1000), D = devicePixelRatio;
-  const w = c.width = c.clientWidth * D, h = c.height = c.clientHeight * D;
-  g.clearRect(0, 0, w, h); g.font = (11 * D) + 'px Helvetica';
-  const L = 40 * D, B = 22 * D, T = 10 * D;
-  let lo = 0, hi = Math.max(110, ...v.map(p => p[2]));
-  if (auto && v.length) {
-    lo = Math.min(...v.map(p => p[2])); hi = Math.max(...v.map(p => p[2]));
-    const m = Math.max((hi - lo) * .15, 2); lo -= m; hi += m;
-  }
-  const y = p => T + (h - T - B) * (1 - (p - lo) / (hi - lo)), st = schritt((hi - lo) / 5);
-  g.strokeStyle = '#e3e3e0'; g.fillStyle = '#777'; g.lineWidth = 1;
-  for (let p = Math.ceil(lo / st) * st; p <= hi; p += st) {
-    g.beginPath(); g.moveTo(L, y(p)); g.lineTo(w, y(p)); g.stroke(); g.fillText(+p.toFixed(1), 4, y(p) + 4);
-  }
-  if (100 >= lo && 100 <= hi) {
-    g.setLineDash([6 * D, 4 * D]); g.strokeStyle = '#999';
-    g.beginPath(); g.moveTo(L, y(100)); g.lineTo(w, y(100)); g.stroke(); g.setLineDash([]);
-  }
-  if (v.length < 2) return;
-  const t0 = v[0][0], x = t => L + (w - L) * (t - t0) / Math.max(t1 - t0, 1), mitDatum = zeit > 86400;
-  g.fillStyle = '#777';
-  for (let k = 0; k <= 4; k++) {
-    const t = t0 + (t1 - t0) * k / 4, s = uhr(t, mitDatum), bw = g.measureText(s).width;
-    g.fillText(s, Math.min(Math.max(x(t) - bw / 2, L), w - bw), h - 6 * D);
-  }
-  g.strokeStyle = '#222'; g.lineWidth = 2 * D; g.beginPath();
-  v.forEach((p, i) => i ? g.lineTo(x(p[0]), y(p[2])) : g.moveTo(x(p[0]), y(p[2]))); g.stroke();
+  const t1 = daten.length ? daten[daten.length - 1][0] : Date.now();
+  const v = daten.filter(p => t1 - p[0] <= zeit * 1000), D = devicePixelRatio;
+  GRAPHEN.forEach((gr, n) => {
+    const c = $('c' + n), g = c.getContext('2d');
+    const w = c.width = c.clientWidth * D, h = c.height = c.clientHeight * D, ys = v.map(p => p[gr.k]);
+    g.clearRect(0, 0, w, h); g.font = (11 * D) + 'px Helvetica';
+    const L = 44 * D, B = 22 * D, T = 10 * D;
+    let lo = gr.lo, hi = Math.max(gr.hi, ...ys);
+    if (auto && ys.length) {
+      lo = Math.min(...ys); hi = Math.max(...ys);
+      const m = Math.max((hi - lo) * .15, gr.k === 4 ? 1 : gr.k === 2 ? 2 : gr.k === 3 ? .1 : .01); lo -= m; hi += m;
+    }
+    const y = p => T + (h - T - B) * (1 - (p - lo) / (hi - lo)), st = schritt((hi - lo) / 4);
+    g.strokeStyle = '#e3e3e0'; g.fillStyle = '#777'; g.lineWidth = 1;
+    for (let p = Math.ceil(lo / st) * st; p <= hi; p += st) {
+      g.beginPath(); g.moveTo(L, y(p)); g.lineTo(w, y(p)); g.stroke(); g.fillText(+p.toFixed(3), 4, y(p) + 4);
+    }
+    if (gr.ref !== null && gr.ref >= lo && gr.ref <= hi) {
+      g.setLineDash([6 * D, 4 * D]); g.strokeStyle = '#999';
+      g.beginPath(); g.moveTo(L, y(gr.ref)); g.lineTo(w, y(gr.ref)); g.stroke(); g.setLineDash([]);
+      g.fillStyle = '#999'; g.fillText('Überlauf', w - 52 * D, y(gr.ref) - 4 * D);
+    }
+    if (v.length < 2) return;
+    const t0 = v[0][0], x = t => L + (w - L) * (t - t0) / Math.max(t1 - t0, 1), mitDatum = zeit > 86400;
+    g.fillStyle = '#777';
+    for (let k = 0; k <= 3; k++) {
+      const t = t0 + (t1 - t0) * k / 3, s = uhr(t, mitDatum), bw = g.measureText(s).width;
+      g.fillText(s, Math.min(Math.max(x(t) - bw / 2, L), w - bw), h - 6 * D);
+    }
+    g.strokeStyle = '#222'; g.lineWidth = 2 * D; g.beginPath();
+    v.forEach((p, i) => i ? g.lineTo(x(p[0]), y(p[gr.k])) : g.moveTo(x(p[0]), y(p[gr.k]))); g.stroke();
+  });
 }
 
 function anzeigen() {
@@ -121,6 +142,7 @@ function anzeigen() {
   z.textContent = p.toFixed(0) + ' %'; z.className = '';
   d.innerHTML = cm.toFixed(0) + ' cm über Sensor<br>noch ' + Math.max(SENSOR_UNTER_VOLL - cm, 0).toFixed(0) +
     ' cm bis Überlauf<br>' + i.toFixed(2) + ' mA · ' + u.toFixed(3) + ' V';
+  GRAPHEN.forEach((gr, n) => $('w' + n).textContent = daten[daten.length - 1][gr.k].toFixed(gr.dez) + ' ' + gr.einheit);
   $('fuell').style.width = Math.min(Math.max(p, 0), 100) + '%';
   st.className = alter > STALE_S ? 'err' : '';
   st.innerHTML = alter > STALE_S ? 'Keine aktuellen Daten<br>letzte Sendung vor ' + Math.round(alter / 60) + ' min'
